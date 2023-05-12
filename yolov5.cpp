@@ -6,12 +6,15 @@
 #include "common.hpp"
 #include "utils.h"
 #include "calibrator.h"
+#include <Windows.h>
+#include <opencv2/opencv.hpp>
 
 #define USE_FP16  // set USE_INT8 or USE_FP16 or USE_FP32
 #define DEVICE 0  // GPU id
 #define NMS_THRESH 0.4
 #define CONF_THRESH 0.5
 #define BATCH_SIZE 1
+typedef __int64(__fastcall* MyMove)(int a1, int a2);
 
 // stuff we know about the network and the input/output blobs
 static const int INPUT_H = Yolo::INPUT_H;
@@ -21,6 +24,88 @@ static const int OUTPUT_SIZE = Yolo::MAX_OUTPUT_BBOX_COUNT * sizeof(Yolo::Detect
 const char* INPUT_BLOB_NAME = "data";
 const char* OUTPUT_BLOB_NAME = "prob";
 static Logger gLogger;
+
+class Screenshot
+{
+public:
+    Screenshot();
+    double static getZoom();
+    cv::Mat getScreenshot();
+    cv::Mat getScreenshot(int x, int y, int width, int height);
+    int m_width;
+    int m_height;
+
+private:
+    HDC m_screenDC;
+    HDC m_compatibleDC;
+    HBITMAP m_hBitmap;
+    LPVOID m_screenshotData = nullptr;
+};
+
+Screenshot::Screenshot()
+{
+    double zoom = getZoom();
+    m_width = GetSystemMetrics(SM_CXSCREEN) * zoom;
+    m_height = GetSystemMetrics(SM_CYSCREEN) * zoom;
+    m_screenshotData = new char[m_width * m_height * 4];
+    memset(m_screenshotData, 0, m_width);
+
+    // 获取屏幕 DC
+    m_screenDC = GetDC(NULL);
+    m_compatibleDC = CreateCompatibleDC(m_screenDC);
+
+    // 创建位图
+    m_hBitmap = CreateCompatibleBitmap(m_screenDC, m_width, m_height);
+    SelectObject(m_compatibleDC, m_hBitmap);
+}
+
+/* 获取整个屏幕的截图 */
+cv::Mat Screenshot::getScreenshot()
+{
+    // 得到位图的数据
+    BitBlt(m_compatibleDC, 0, 0, m_width, m_height, m_screenDC, 0, 0, SRCCOPY);
+    GetBitmapBits(m_hBitmap, m_width * m_height * 4, m_screenshotData);
+
+    // 创建图像
+    cv::Mat screenshot(m_height, m_width, CV_8UC3, m_screenshotData);
+
+    return screenshot;
+}
+
+/** @brief 获取指定范围的屏幕截图
+ * @param x 图像左上角的 X 坐标
+ * @param y 图像左上角的 Y 坐标
+ * @param width 图像宽度
+ * @param height 图像高度
+ */
+cv::Mat Screenshot::getScreenshot(int x, int y, int width, int height)
+{
+    cv::Mat screenshot = getScreenshot();
+    return screenshot(cv::Rect(x, y, width, height));
+}
+
+/* 获取屏幕缩放值 */
+double Screenshot::getZoom()
+{
+    // 获取窗口当前显示的监视器
+    HWND hWnd = GetDesktopWindow();
+    HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+
+    // 获取监视器逻辑宽度
+    MONITORINFOEX monitorInfo;
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    GetMonitorInfo(hMonitor, &monitorInfo);
+    int cxLogical = (monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left);
+
+    // 获取监视器物理宽度
+    DEVMODE dm;
+    dm.dmSize = sizeof(dm);
+    dm.dmDriverExtra = 0;
+    EnumDisplaySettings(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &dm);
+    int cxPhysical = dm.dmPelsWidth;
+
+    return cxPhysical * 1.0 / cxLogical;
+}
 
 static int get_width(int x, float gw, int divisor = 8) {
     return int(ceil((x * gw) / divisor)) * divisor;
@@ -375,50 +460,68 @@ int main(int argc, char** argv) {
     // Create stream
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
+    std::vector<std::vector<Yolo::Detection>> batch_res(1);
+    Screenshot screen_shot;
 
-    int fcount = 0;
-    for (int f = 0; f < (int)file_names.size(); f++) {
-        fcount++;
-        if (fcount < BATCH_SIZE && f + 1 != (int)file_names.size()) continue;
-        for (int b = 0; b < fcount; b++) {
-            cv::Mat img = cv::imread(img_dir + "/" + file_names[f - fcount + 1 + b]);
-            if (img.empty()) continue;
-            cv::Mat pr_img = preprocess_img(img, INPUT_W, INPUT_H); // letterbox BGR to RGB
-            int i = 0;
-            for (int row = 0; row < INPUT_H; ++row) {
-                uchar* uc_pixel = pr_img.data + row * pr_img.step;
-                for (int col = 0; col < INPUT_W; ++col) {
-                    data[b * 3 * INPUT_H * INPUT_W + i] = (float)uc_pixel[2] / 255.0;
-                    data[b * 3 * INPUT_H * INPUT_W + i + INPUT_H * INPUT_W] = (float)uc_pixel[1] / 255.0;
-                    data[b * 3 * INPUT_H * INPUT_W + i + 2 * INPUT_H * INPUT_W] = (float)uc_pixel[0] / 255.0;
-                    uc_pixel += 3;
-                    ++i;
-                }
+    while (true) {
+
+        std::cout << "cnm" << std::endl;
+        int screen_shot_width = 320;
+        int screen_shot_height = 320;
+        int screen_shot_x = screen_shot.m_width / 2 - screen_shot_width / 2;
+        int screen_shot_y = screen_shot.m_height / 2 - screen_shot_height / 2;
+
+        //// 内存泄露
+        //std::cout << "cnm5" << std::endl;
+
+        cv::Mat image = screen_shot.getScreenshot(screen_shot_x, screen_shot_y, screen_shot_width, screen_shot_height);
+        if (image.empty()) continue;
+        std::cout << "cnm4" << std::endl;
+
+        cv::Mat pr_img = preprocess_img(image, INPUT_W, INPUT_W); // letterbox bgr to rgb
+        //std::cout << "cnm1" << std::endl;
+        // 内存泄露
+
+
+        int i = 0;
+        int b = 0;
+        for (int row = 0; row < INPUT_H; ++row) {
+            uchar* uc_pixel = pr_img.data + row * pr_img.step;
+            for (int col = 0; col < INPUT_W; ++col) {
+                data[b * 3 * INPUT_H * INPUT_W + i] = (float)uc_pixel[2] / 255.0;
+                data[b * 3 * INPUT_H * INPUT_W + i + INPUT_H * INPUT_W] = (float)uc_pixel[1] / 255.0;
+                data[b * 3 * INPUT_H * INPUT_W + i + 2 * INPUT_H * INPUT_W] = (float)uc_pixel[0] / 255.0;
+                uc_pixel += 3;
+                ++i;
             }
         }
+        std::cout << "cnm2" << std::endl;
 
-        // Run inference
-        auto start = std::chrono::system_clock::now();
+
         doInference(*context, stream, buffers, data, prob, BATCH_SIZE);
-        auto end = std::chrono::system_clock::now();
-        std::cout << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << "ms" << std::endl;
-        std::vector<std::vector<Yolo::Detection>> batch_res(fcount);
-        for (int b = 0; b < fcount; b++) {
-            auto& res = batch_res[b];
-            nms(res, &prob[b * OUTPUT_SIZE], CONF_THRESH, NMS_THRESH);
+        std::cout << "cnm111" << std::endl;
+
+        auto& res = batch_res[0];
+        nms(res, &prob[0], CONF_THRESH, NMS_THRESH);
+
+        std::cout << "cnm111" << std::endl;
+
+
+        float* bbox = res[0].bbox;
+        if (bbox) {
+            float head_x = (bbox[0] + bbox[2]) / 2;
+            float head_y = (bbox[1] + bbox[3]) / 2;
+            std::cout << "cnm3" << std::endl;
         }
-        for (int b = 0; b < fcount; b++) {
-            auto& res = batch_res[b];
-            //std::cout << res.size() << std::endl;
-            cv::Mat img = cv::imread(img_dir + "/" + file_names[f - fcount + 1 + b]);
-            for (size_t j = 0; j < res.size(); j++) {
-                cv::Rect r = get_rect(img, res[j].bbox);
-                cv::rectangle(img, r, cv::Scalar(0x27, 0xC1, 0x36), 2);
-                cv::putText(img, std::to_string((int)res[j].class_id), cv::Point(r.x, r.y - 1), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(0xFF, 0xFF, 0xFF), 2);
-            }
-            cv::imwrite("_" + file_names[f - fcount + 1 + b], img);
-        }
-        fcount = 0;
+
+
+
+        //HINSTANCE library = LoadLibrary("user32.dll");
+        //MyMove Mach_Move = (MyMove)GetProcAddress(library, "Mach_Move");
+        //if (Mach_Move) {
+        //    Mach_Move(head_x, head_y);
+        //}
+        
     }
 
     // Release stream and buffers
