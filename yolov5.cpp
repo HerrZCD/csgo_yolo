@@ -10,6 +10,7 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 #include <conio.h>
+#include<cstdio>
 
 #define USE_FP16  // set USE_INT8 or USE_FP16 or USE_FP32
 #define DEVICE 0  // GPU id
@@ -465,7 +466,6 @@ int main(int argc, char** argv) {
     assert(context != nullptr);
     delete[] trtModelStream;
     assert(engine->getNbBindings() == 2);
-    void* buffers[2];
     // In order to bind the buffers, we need to know the names of the input and output tensors.
     // Note that indices are guaranteed to be less than IEngine::getNbBindings()
     const int inputIndex = engine->getBindingIndex(INPUT_BLOB_NAME);
@@ -473,19 +473,26 @@ int main(int argc, char** argv) {
     assert(inputIndex == 0);
     assert(outputIndex == 1);
     // Create GPU buffers on device
-    CUDA_CHECK(cudaMalloc(&buffers[inputIndex], BATCH_SIZE * 3 * INPUT_H * INPUT_W * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&buffers[outputIndex], BATCH_SIZE * OUTPUT_SIZE * sizeof(float)));
     // Create stream
-    cudaStream_t stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
-    std::vector<std::vector<Yolo::Detection>> batch_res(1);
+
     Screenshot screen_shot;
     HINSTANCE library = LoadLibrary("Logitech.dll");
+    MyMove Mach_Move;
+    if (library) {
+        Mach_Move = (MyMove)GetProcAddress(library, "Mach_Move");
+    }
 
     while (1) {
         if (!processing) {
             continue;
         }
+        void* buffers[2];
+        cudaStream_t stream;
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        CUDA_CHECK(cudaMalloc(&buffers[inputIndex], BATCH_SIZE * 3 * INPUT_H * INPUT_W * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&buffers[outputIndex], BATCH_SIZE * OUTPUT_SIZE * sizeof(float)));
+
+        std::vector<std::vector<Yolo::Detection>> batch_res(1);
 
         int screen_shot_width = 320;
         int screen_shot_height = 320;
@@ -526,47 +533,34 @@ int main(int argc, char** argv) {
 
 
         for (size_t j = 0; j < res.size(); j++) {
-
+            std::cout << "res size" << res.size();
             std::cout << "class id: " << std::to_string((int)res[j].class_id) << std::endl;
-            float* bbox = res[0].bbox;
-            if (bbox) {
+            float* bbox = res[j].bbox;
+            if (bbox && (int)res[j].class_id == 1) {
                 float head_x = (bbox[0] + bbox[2]) / 2;
                 float head_y = (bbox[1] + bbox[3]) / 2;
                 std::cout << "found target on X; " << head_x << "y: " << head_y << std::endl;
-                    /* if (Mach_Move) {
-                         Mach_Move(head_x, head_y);
+                int rel_x = head_x + (screen_shot.m_width - screen_shot_width) / 2 - screen_shot_x;
+                int rel_y = head_y + (screen_shot.m_height - screen_shot_height) / 2 - screen_shot_y;
+                if (rel_x || rel_y) {
+                     /*if (Mach_Move) {
+                         Mach_Move(rel_x, rel_y);
                      }*/
+                    std::cout << "break";
+                    break;
+                }
             }
 
         }
-       
-        //if (library) {
-        //    MyMove Mach_Move = (MyMove)GetProcAddress(library, "Mach_Move");
-        //    float* bbox = res[0].bbox;
-        //    if (bbox) {
-        //        float head_x = (bbox[0] + bbox[2]) / 2;
-        //        float head_y = (bbox[1] + bbox[3]) / 2;
-        //        std::cout << "found target on X; " << head_x << "y: " << head_y << std::endl;
-        //        // +std::to_string((int)res[0].class_id
-        //       /* if (Mach_Move) {
-        //            Mach_Move(head_x, head_y);
-        //        }*/
-        //    }
-        //}
-
-
-        //HINSTANCE library = LoadLibrary("user32.dll");
-        //MyMove Mach_Move = (MyMove)GetProcAddress(library, "Mach_Move");
-        //if (Mach_Move) {
-        //    Mach_Move(head_x, head_y);
-        //}
-        
+        remove("screen_shot.jpg");
+        batch_res.clear();
+        cudaStreamDestroy(stream);
+        CUDA_CHECK(cudaFree(buffers[inputIndex]));
+        CUDA_CHECK(cudaFree(buffers[outputIndex]));
     }
 
     // Release stream and buffers
-    cudaStreamDestroy(stream);
-    CUDA_CHECK(cudaFree(buffers[inputIndex]));
-    CUDA_CHECK(cudaFree(buffers[outputIndex]));
+
     // Destroy the engine
     context->destroy();
     engine->destroy();
