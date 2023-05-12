@@ -8,6 +8,8 @@
 #include "calibrator.h"
 #include <Windows.h>
 #include <opencv2/opencv.hpp>
+#include <thread>
+#include <conio.h>
 
 #define USE_FP16  // set USE_INT8 or USE_FP16 or USE_FP32
 #define DEVICE 0  // GPU id
@@ -24,6 +26,8 @@ static const int OUTPUT_SIZE = Yolo::MAX_OUTPUT_BBOX_COUNT * sizeof(Yolo::Detect
 const char* INPUT_BLOB_NAME = "data";
 const char* OUTPUT_BLOB_NAME = "prob";
 static Logger gLogger;
+
+bool processing = false;
 
 class Screenshot
 {
@@ -67,7 +71,7 @@ cv::Mat Screenshot::getScreenshot()
     GetBitmapBits(m_hBitmap, m_width * m_height * 4, m_screenshotData);
 
     // 创建图像
-    cv::Mat screenshot(m_height, m_width, CV_8UC3, m_screenshotData);
+    cv::Mat screenshot(m_height, m_width, CV_8UC4, m_screenshotData);
 
     return screenshot;
 }
@@ -382,8 +386,22 @@ bool parse_args(int argc, char** argv, std::string& wts, std::string& engine, bo
     return true;
 }
 
+void ListenKeyStroke() {
+    int ch;
+    while (1) {
+        if (_kbhit()) {//如果有按键按下，则_kbhit()函数返回真
+            ch = _getch();//使用_getch()函数获取按下的键值
+            std::cout << ch;
+            if (ch == 91) {
+                processing = !processing;
+            }
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     cudaSetDevice(DEVICE);
+    std::thread user_thread(ListenKeyStroke);
 
     std::string wts_name = "";
     std::string engine_name = "";
@@ -462,10 +480,13 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaStreamCreate(&stream));
     std::vector<std::vector<Yolo::Detection>> batch_res(1);
     Screenshot screen_shot;
+    HINSTANCE library = LoadLibrary("Logitech.dll");
 
-    while (true) {
+    while (1) {
+        if (!processing) {
+            continue;
+        }
 
-        std::cout << "cnm" << std::endl;
         int screen_shot_width = 320;
         int screen_shot_height = 320;
         int screen_shot_x = screen_shot.m_width / 2 - screen_shot_width / 2;
@@ -475,10 +496,11 @@ int main(int argc, char** argv) {
         //std::cout << "cnm5" << std::endl;
 
         cv::Mat image = screen_shot.getScreenshot(screen_shot_x, screen_shot_y, screen_shot_width, screen_shot_height);
+        cv::imwrite("screen_shot.jpg", image);
+        cv::Mat img = cv::imread("screen_shot.jpg");
         if (image.empty()) continue;
-        std::cout << "cnm4" << std::endl;
 
-        cv::Mat pr_img = preprocess_img(image, INPUT_W, INPUT_W); // letterbox bgr to rgb
+        cv::Mat pr_img = preprocess_img(img, INPUT_W, INPUT_W); // letterbox bgr to rgb
         //std::cout << "cnm1" << std::endl;
         // 内存泄露
 
@@ -495,25 +517,42 @@ int main(int argc, char** argv) {
                 ++i;
             }
         }
-        std::cout << "cnm2" << std::endl;
 
 
         doInference(*context, stream, buffers, data, prob, BATCH_SIZE);
-        std::cout << "cnm111" << std::endl;
 
         auto& res = batch_res[0];
         nms(res, &prob[0], CONF_THRESH, NMS_THRESH);
 
-        std::cout << "cnm111" << std::endl;
 
+        for (size_t j = 0; j < res.size(); j++) {
 
-        float* bbox = res[0].bbox;
-        if (bbox) {
-            float head_x = (bbox[0] + bbox[2]) / 2;
-            float head_y = (bbox[1] + bbox[3]) / 2;
-            std::cout << "cnm3" << std::endl;
+            std::cout << "class id: " << std::to_string((int)res[j].class_id) << std::endl;
+            float* bbox = res[0].bbox;
+            if (bbox) {
+                float head_x = (bbox[0] + bbox[2]) / 2;
+                float head_y = (bbox[1] + bbox[3]) / 2;
+                std::cout << "found target on X; " << head_x << "y: " << head_y << std::endl;
+                    /* if (Mach_Move) {
+                         Mach_Move(head_x, head_y);
+                     }*/
+            }
+
         }
-
+       
+        //if (library) {
+        //    MyMove Mach_Move = (MyMove)GetProcAddress(library, "Mach_Move");
+        //    float* bbox = res[0].bbox;
+        //    if (bbox) {
+        //        float head_x = (bbox[0] + bbox[2]) / 2;
+        //        float head_y = (bbox[1] + bbox[3]) / 2;
+        //        std::cout << "found target on X; " << head_x << "y: " << head_y << std::endl;
+        //        // +std::to_string((int)res[0].class_id
+        //       /* if (Mach_Move) {
+        //            Mach_Move(head_x, head_y);
+        //        }*/
+        //    }
+        //}
 
 
         //HINSTANCE library = LoadLibrary("user32.dll");
@@ -541,6 +580,7 @@ int main(int argc, char** argv) {
     //    if (i % 10 == 0) std::cout << std::endl;
     //}
     //std::cout << std::endl;
+    user_thread.join();
 
     return 0;
 }
